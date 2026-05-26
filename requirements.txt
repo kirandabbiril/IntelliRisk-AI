@@ -1,10 +1,10 @@
 pandas
-numpy
+numpy==1.26.4
 scikit-learn
 xgboost
 lightgbm
 imbalanced-learn
-shap==0.46.0
+shap==0.45.0
 matplotlib
 seaborn
 plotly
