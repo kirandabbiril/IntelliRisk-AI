@@ -13,5 +13,5 @@ joblib
 groq
 gTTS
 streamlit-mic-recorder
-chromadb==0.4.24
-sentence-transformers==2.2.2
+chromadb==0.5.3
+sentence-transformers==3.0.1
