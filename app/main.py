@@ -2,13 +2,19 @@
 # ============================================================
 # INTELLIRISK AI — Unified Platform Entry Point
 # Integrates Loan Approval + Insurance Fraud Detection
+# FIX 1: Monthly annuity converted to annual before model input
+# FIX 2: Rejection threshold lowered to 0.15
 # ============================================================
 from analytics_dashboard import render_analytics_dashboard
 from rag_chatbot import render_rag_chatbot
+from model_service import (
+    load_loan_model, load_fraud_models, load_loan_data, load_fraud_data,
+    predict_loan, predict_fraud, get_shap,
+)
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib, os, sys, warnings
+import os, sys, warnings
 import matplotlib
 matplotlib.use('Agg')
 import plotly.graph_objects as go
@@ -17,9 +23,6 @@ warnings.filterwarnings('ignore')
 
 # ── Path Setup ───────────────────────────────────────────────
 BASE_DIR        = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOAN_MODELS_DIR = os.path.join(BASE_DIR, 'Models', 'loan')
-FRAUD_MODELS_DIR= os.path.join(BASE_DIR, 'Models', 'fraud')
-DATA_DIR        = os.path.join(BASE_DIR, 'Data', 'processed')
 sys.path.insert(0, BASE_DIR)
 
 # ── Page Config ──────────────────────────────────────────────
@@ -142,77 +145,9 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 """, unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════
-# ── MODEL LOADERS ────────────────────────────────────────────
+# ── MODEL LOADERS / SCORING ──────────────────────────────────
+#   (moved to model_service.py — shared with the agentic chatbot)
 # ════════════════════════════════════════════════════════════
-@st.cache_resource
-def load_loan_model():
-    m = joblib.load(os.path.join(LOAN_MODELS_DIR,'best_loan_model.pkl'))
-    f = joblib.load(os.path.join(LOAN_MODELS_DIR,'feature_names.pkl'))
-    return m, f
-
-@st.cache_resource
-def load_fraud_models():
-    m   = joblib.load(os.path.join(FRAUD_MODELS_DIR,'best_fraud_model.pkl'))
-    f   = joblib.load(os.path.join(FRAUD_MODELS_DIR,'fraud_feature_names.pkl'))
-    iso = joblib.load(os.path.join(FRAUD_MODELS_DIR,'isolation_forest.pkl'))
-    return m, f, iso
-
-@st.cache_data
-def load_loan_data():
-    return pd.read_csv(os.path.join(DATA_DIR,'loan_processed.csv'))
-
-@st.cache_data
-def load_fraud_data():
-    return pd.read_csv(os.path.join(DATA_DIR,'fraud_processed.csv'))
-
-# ════════════════════════════════════════════════════════════
-# ── SHARED HELPERS ───────────────────────────────────────────
-# ════════════════════════════════════════════════════════════
-def predict_loan(app, model, feats):
-    df = pd.DataFrame([app])
-    for c in feats:
-        if c not in df: df[c] = 0
-    df = df[feats]
-    p  = float(model.predict_proba(df)[0][1])
-    if p < 0.15:   dec,risk,col='APPROVED','LOW RISK','#10b981'
-    elif p < 0.25: dec,risk,col='APPROVED','MEDIUM RISK','#f59e0b'
-    else:          dec,risk,col='REJECTED','HIGH RISK','#ef4444'
-    return {'decision':dec,'risk':risk,'color':col,
-            'ap':round((1-p)*100,1),'dp':round(p*100,1),'df':df}
-
-def predict_fraud(claim, model, feats, iso):
-    df      = pd.DataFrame([claim])
-    for c in feats:
-        if c not in df: df[c] = 0
-    df      = df[feats]
-    p       = float(model.predict_proba(df)[0][1])
-    ano     = iso.decision_function(df)[0]
-    ano_pct = max(0, min(100, round((1-(ano+0.5))*100,1)))
-    if p < 0.3:   ver,risk,col='LEGITIMATE','LOW RISK','#10b981'
-    elif p < 0.5: ver,risk,col='SUSPICIOUS','MEDIUM RISK','#f59e0b'
-    else:         ver,risk,col='FRAUDULENT','HIGH RISK','#ef4444'
-    return {'verdict':ver,'risk':risk,'color':col,
-            'fp':round(p*100,2),'lp':round((1-p)*100,2),
-            'ano':ano_pct,'df':df}
-
-def get_shap(model, df, feats):
-    """Get SHAP values — applies NumPy patch for Python 3.14 compatibility."""
-    try:
-        import shap_patch  # apply numpy monkey-patch first
-        import shap
-        ex   = shap.TreeExplainer(model)
-        vals = ex.shap_values(df)
-        return pd.DataFrame({
-            'Feature': feats,
-            'Value'  : df.values[0],
-            'SHAP'   : vals[0]
-        }).sort_values('SHAP', key=abs, ascending=False).head(12), True
-    except Exception:
-        return pd.DataFrame({
-            'Feature': list(feats[:12]),
-            'Value'  : list(df.values[0][:12]),
-            'SHAP'   : [0.0] * 12
-        }), False
 
 def gauge(pct, color, title):
     fig = go.Figure(go.Indicator(
@@ -252,7 +187,6 @@ def shap_chart(shap_df, title):
     return fig
 
 def render_shap_section(model, df, feats, title_chart, title_section, flag_color, flag_label, support_label):
-    """Renders SHAP chart + explanation, or a friendly message if SHAP unavailable."""
     with st.spinner("🔍 Generating AI explanation..."):
         sd, shap_ok = get_shap(model, df, feats)
 
@@ -306,7 +240,7 @@ def render_sidebar():
             st.session_state.page = 'fraud';   st.rerun()
         if st.button("📊 Analytics Dashboard",   use_container_width=True, type="secondary"):
             st.session_state.page = 'analytics';st.rerun()
-        if st.button("🤖 AI Chatbot (RAG)",      use_container_width=True, type="secondary"):
+        if st.button("🤖 AI Agent (Tools + RAG)", use_container_width=True, type="secondary"):
             st.session_state.page = 'chatbot'; st.rerun()
         st.divider()
         st.markdown("**📊 Platform Overview**")
@@ -322,7 +256,7 @@ def render_sidebar():
             </div>""", unsafe_allow_html=True)
         st.divider()
         page_names = {'home':'🏠 Home','loan':'🏦 Loan Module','fraud':'🛡️ Fraud Module',
-                      'analytics':'📊 Analytics','chatbot':'🤖 AI Chatbot'}
+                      'analytics':'📊 Analytics','chatbot':'🤖 AI Agent'}
         st.markdown(f"""
         <div style='background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);
                     border-radius:8px;padding:10px;text-align:center;'>
@@ -407,7 +341,7 @@ def render_home():
         ("🔍","Explainable AI","SHAP values show exactly why every decision was made — no black box."),
         ("⚡","Real-Time Predictions","Instant AI decisions on any new applicant or claim in milliseconds."),
         ("📊","Interactive Analytics","Full portfolio dashboards with charts, trends, and KPIs."),
-        ("🤖","RAG AI Chatbot","Ask anything about loan policies and fraud rules — powered by Llama 3."),
+        ("🤖","Agentic AI Analyst","Ask about policy, live portfolio stats, or what-if scenarios — an LLM agent picks the right tool (policy RAG, live SQL, or the trained models) automatically."),
     ]):
         with col:
             st.markdown(f"<div class='feature-card'><div class='feature-icon'>{icon}</div>"
@@ -438,9 +372,9 @@ def render_home():
         <div class='footer-title' style='background:linear-gradient(135deg,#a5b4fc,#22d3ee);
             -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>
             🧠 IntelliRisk AI</div>
-        <div class='footer-sub'>Enterprise AI Platform — Loan Intelligence &nbsp;·&nbsp; Fraud Detection<br>
+        <div class='footer-sub'>Enterprise AI Platform — Loan Intelligence &nbsp;·&nbsp; Fraud Detection &nbsp;·&nbsp; Agentic Analyst<br>
             Python &nbsp;·&nbsp; XGBoost &nbsp;·&nbsp; SHAP &nbsp;·&nbsp; SMOTE &nbsp;·&nbsp;
-            Streamlit &nbsp;·&nbsp; Plotly &nbsp;·&nbsp; ChromaDB &nbsp;·&nbsp; Llama 3</div>
+            Streamlit &nbsp;·&nbsp; Plotly &nbsp;·&nbsp; DuckDB &nbsp;·&nbsp; Llama 3.3 (Groq)</div>
     </div>""", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════
@@ -489,7 +423,8 @@ def render_loan():
             st.markdown("<div class='section-header-gold'>💰 Financial Details</div>", unsafe_allow_html=True)
             income  = st.number_input("Annual Income ($)",10000,1000000,75000,5000)
             credit  = st.number_input("Loan Amount ($)",10000,2000000,200000,10000)
-            annuity = st.number_input("Monthly Payment ($)",1000,100000,15000,500)
+            annuity = st.number_input("Monthly Payment ($)",500,50000,5000,500,
+                                      help="Your expected monthly repayment amount")
             goods   = st.number_input("Asset Value ($)",5000,2000000,180000,5000)
         with c2:
             st.markdown("<div class='section-header-gold'>📈 Credit Profile</div>", unsafe_allow_html=True)
@@ -514,20 +449,30 @@ def render_loan():
             go_btn = st.button("🚀 Analyze Loan Application", type="primary", use_container_width=True, key="loan_analyze")
 
         if go_btn:
+            # ── FIX 1: Convert monthly payment → annual for model ──
+            annual_annuity = annuity * 12
+
             app = {
-                'AMT_INCOME_TOTAL':income,'AMT_CREDIT':credit,
-                'AMT_ANNUITY':annuity,'AMT_GOODS_PRICE':goods,
-                'EXT_SOURCE_1':e1,'EXT_SOURCE_2':e2,'EXT_SOURCE_3':e3,
-                'AGE_YEARS':age,'EMPLOYED_YEARS':emp,
-                'CREDIT_INCOME_RATIO':credit/(income+1),
-                'ANNUITY_INCOME_RATIO':annuity/(income+1),
-                'CREDIT_TERM':annuity/(credit+1),
-                'GOODS_CREDIT_RATIO':goods/(credit+1),
-                'EXT_SOURCE_MEAN':np.mean([e1,e2,e3]),
-                'CNT_CHILDREN':kids,'CNT_FAM_MEMBERS':fam,
-                'FLAG_OWN_CAR':1 if car=="Yes" else 0,
-                'FLAG_OWN_REALTY':1 if realty=="Yes" else 0,
-                'DEF_30_CNT_SOCIAL_CIRCLE':d30,'DEF_60_CNT_SOCIAL_CIRCLE':d60,
+                'AMT_INCOME_TOTAL'        : income,
+                'AMT_CREDIT'              : credit,
+                'AMT_ANNUITY'             : annual_annuity,        # FIX 1 applied
+                'AMT_GOODS_PRICE'         : goods,
+                'EXT_SOURCE_1'            : e1,
+                'EXT_SOURCE_2'            : e2,
+                'EXT_SOURCE_3'            : e3,
+                'AGE_YEARS'               : age,
+                'EMPLOYED_YEARS'          : emp,
+                'CREDIT_INCOME_RATIO'     : credit/(income+1),
+                'ANNUITY_INCOME_RATIO'    : annual_annuity/(income+1),  # FIX 1 applied
+                'CREDIT_TERM'             : annual_annuity/(credit+1),  # FIX 1 applied
+                'GOODS_CREDIT_RATIO'      : goods/(credit+1),
+                'EXT_SOURCE_MEAN'         : np.mean([e1,e2,e3]),
+                'CNT_CHILDREN'            : kids,
+                'CNT_FAM_MEMBERS'         : fam,
+                'FLAG_OWN_CAR'            : 1 if car=="Yes" else 0,
+                'FLAG_OWN_REALTY'         : 1 if realty=="Yes" else 0,
+                'DEF_30_CNT_SOCIAL_CIRCLE': d30,
+                'DEF_60_CNT_SOCIAL_CIRCLE': d60,
             }
             res = predict_loan(app, model, feats)
             st.divider()
